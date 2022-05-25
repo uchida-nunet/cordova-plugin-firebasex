@@ -55,6 +55,12 @@ static NSMutableDictionary* traces;
     firestore = firestoreInstance;
 }
 
+- (void)applicationLaunchedWithUrl:(NSNotification*)notification
+{
+    NSURL* url = [notification object];
+    [[GIDSignIn sharedInstance] handleURL:url];
+}
+
 // @override abstract
 - (void)pluginInitialize {
     NSLog(@"Starting Firebase plugin");
@@ -64,6 +70,8 @@ static NSMutableDictionary* traces;
         preferences = [NSUserDefaults standardUserDefaults];
         googlePlist = [NSMutableDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"GoogleService-Info" ofType:@"plist"]];
 
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationLaunchedWithUrl:) name:CDVPluginHandleOpenURLNotification object:nil];
+        
         if([self getGooglePlistFlagWithDefaultValue:FirebaseCrashlyticsCollectionEnabled defaultValue:YES]){
             [self setPreferenceFlag:FIREBASE_CRASHLYTICS_COLLECTION_ENABLED flag:YES];
         }
@@ -81,7 +89,7 @@ static NSMutableDictionary* traces;
 
         // Check for permission and register for remote notifications if granted
         [self _hasPermission:^(BOOL result) {}];
-        
+
 
         authCredentials = [[NSMutableDictionary alloc] init];
         firestoreListeners = [[NSMutableDictionary alloc] init];
@@ -477,7 +485,22 @@ static NSMutableDictionary* traces;
 }
 
 - (void)unregister:(CDVInvokedUrlCommand *)command {
-    [self deleteInstallationId:command];
+    @try {
+        __block NSError* error = nil;
+        [[FIRMessaging messaging] deleteTokenWithCompletion:^(NSError * _Nullable deleteTokenError) {
+            if(error == nil && deleteTokenError != nil) error = deleteTokenError;
+            if([FIRMessaging messaging].isAutoInitEnabled){
+                [self _getToken:^(NSString* token, NSError* getError) {
+                    if(error == nil && getError != nil) error = getError;
+                    [self handleEmptyResultWithPotentialError:error command:command];
+                }];
+            }else{
+                [self handleEmptyResultWithPotentialError:error command:command];
+            }
+        }];
+    }@catch (NSException *exception) {
+        [self handlePluginExceptionWithContext:exception :command];
+    }
 }
 
 - (void) onOpenSettings:(CDVInvokedUrlCommand *)command {
@@ -738,7 +761,7 @@ static NSMutableDictionary* traces;
         [GIDSignIn.sharedInstance signInWithConfiguration:googleSignInConfig presentingViewController:self.viewController callback:^(GIDGoogleUser * _Nullable user, NSError * _Nullable error) {
           __auto_type strongSelf = weakSelf;
           if (strongSelf == nil) { return; }
-            
+
             @try{
                 CDVPluginResult* pluginResult;
                 if (error == nil) {
@@ -746,7 +769,7 @@ static NSMutableDictionary* traces;
                     FIRAuthCredential *credential =
                     [FIRGoogleAuthProvider credentialWithIDToken:authentication.idToken
                                                    accessToken:authentication.accessToken];
-                    
+
                     NSNumber* key = [[FirebasePlugin firebasePlugin] saveAuthCredential:credential];
                     NSString *idToken = user.authentication.idToken;
                     NSMutableDictionary* result = [[NSMutableDictionary alloc] init];
@@ -1170,6 +1193,29 @@ static NSMutableDictionary* traces;
     @try {
         [[FIRAuth auth] useEmulatorWithHost:host port:port];
         [self sendPluginSuccess:command];
+    }@catch (NSException *exception) {
+        [self handlePluginExceptionWithContext:exception :command];
+    }
+}
+
+- (void)getClaims:(CDVInvokedUrlCommand *)command {
+    @try {
+        FIRUser* user = [FIRAuth auth].currentUser;
+
+        if(!user){
+            [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"No user is currently signed"] callbackId:command.callbackId];
+            return;
+        }
+
+        [user getIDTokenResultWithCompletion:^(FIRAuthTokenResult * _Nullable tokenResult, NSError * _Nullable error) {
+            if(error != nil){
+                [self sendPluginErrorWithError:error command:command];
+                return;
+            }
+
+            [self sendPluginDictionaryResult:tokenResult.claims command:command callbackId:command.callbackId];
+        }];
+
     }@catch (NSException *exception) {
         [self handlePluginExceptionWithContext:exception :command];
     }
